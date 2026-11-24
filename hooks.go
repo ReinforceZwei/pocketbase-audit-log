@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 
+	"ganigeorgiev.com/pocketbase/dbx"
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
 )
 
@@ -65,7 +66,8 @@ func registerHooks(app core.App, cfg Config) {
 		changes := buildCreateDiff(e.Record, ignored)
 		if len(changes) > 0 {
 			actorID := loadActor(&actorStore, e.Record)
-			writeAuditLog(e.App, cfg, e.Record, ActionCreate, actorID, changes)
+			metadata := resolveMetadata(cfg, e)
+			writeAuditLog(e.App, cfg, e.Record, ActionCreate, actorID, changes, metadata)
 		}
 		return e.Next()
 	})
@@ -84,7 +86,8 @@ func registerHooks(app core.App, cfg Config) {
 		changes := buildUpdateDiff(oldRecord, e.Record, ignored)
 		if len(changes) > 0 {
 			actorID := loadActor(&actorStore, e.Record)
-			writeAuditLog(e.App, cfg, e.Record, ActionUpdate, actorID, changes)
+			metadata := resolveMetadata(cfg, e)
+			writeAuditLog(e.App, cfg, e.Record, ActionUpdate, actorID, changes, metadata)
 		}
 		return e.Next()
 	})
@@ -101,10 +104,30 @@ func registerHooks(app core.App, cfg Config) {
 		changes := buildDeleteDiff(target, ignored)
 		if len(changes) > 0 {
 			actorID := loadActor(&actorStore, e.Record)
-			writeAuditLog(e.App, cfg, target, ActionDelete, actorID, changes)
+			metaEvent := e
+			if target != e.Record {
+				metaEvent = &core.RecordEvent{App: e.App, Record: target}
+			}
+			metadata := resolveMetadata(cfg, metaEvent)
+			writeAuditLog(e.App, cfg, target, ActionDelete, actorID, changes, metadata)
 		}
 		return e.Next()
 	})
+
+	// Purge audit logs when an owner record (e.g. user account) is deleted so
+	// a reused owner ID can never expose historical logs to a new account.
+	if cfg.OwnerField != "" && cfg.OwnerCollection != "" {
+		app.OnRecordAfterDeleteSuccess(cfg.OwnerCollection).BindFunc(func(e *core.RecordEvent) error {
+			if e.Record != nil && e.Record.Id != "" {
+				if _, err := e.App.DB().
+					Delete(cfg.CollectionName, dbx.HashExp{"ownerId": e.Record.Id}).
+					Execute(); err != nil {
+					log.Printf("[auditlog] failed to purge logs for deleted %s/%s: %v", cfg.OwnerCollection, e.Record.Id, err)
+				}
+			}
+			return e.Next()
+		})
+	}
 }
 
 func shouldSkip(e *core.RecordEvent, cfg Config) bool {
@@ -136,6 +159,17 @@ func loadActor(store *sync.Map, record *core.Record) string {
 	return "system"
 }
 
+func resolveMetadata(cfg Config, e *core.RecordEvent) map[string]any {
+	if cfg.MetadataFunc == nil {
+		return nil
+	}
+	meta := cfg.MetadataFunc(e)
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
+}
+
 func writeAuditLog(
 	app core.App,
 	cfg Config,
@@ -143,6 +177,7 @@ func writeAuditLog(
 	action string,
 	actorID string,
 	changes map[string]FieldChange,
+	metadata map[string]any,
 ) {
 	col, err := app.FindCollectionByNameOrId(cfg.CollectionName)
 	if err != nil {
@@ -159,6 +194,9 @@ func writeAuditLog(
 		entry.Set("ownerId", record.GetString(cfg.OwnerField))
 	}
 	entry.Set("changes", changes)
+	if len(metadata) > 0 {
+		entry.Set("metadata", metadata)
+	}
 
 	if err := app.Save(entry); err != nil {
 		log.Printf("[auditlog] failed to save audit log for %s/%s: %v", record.Collection().Name, record.Id, err)

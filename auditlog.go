@@ -27,6 +27,10 @@ var DefaultIgnoredFields = []string{"id", "created", "updated"}
 // Return true to skip logging the event.
 type SkipFunc func(e *core.RecordEvent) bool
 
+// MetadataFunc returns an optional custom metadata map to attach to an audit log entry.
+// Returning nil or an empty map stores no metadata.
+type MetadataFunc func(e *core.RecordEvent) map[string]any
+
 // Config holds all customizable settings for the audit log plugin.
 type Config struct {
 	// CollectionName is the name of the collection that stores audit logs.
@@ -50,8 +54,16 @@ type Config struct {
 	// When empty, List/View rules are nil (superuser-only).
 	OwnerField string
 
+	// OwnerCollection is the auth/owner collection name (default: "users").
+	// When both OwnerField and OwnerCollection are non-empty, deleting a record
+	// from OwnerCollection automatically purges its auditLogs entries.
+	OwnerCollection string
+
 	// SkipFunc is an optional predicate; when it returns true, no audit log is written.
 	SkipFunc SkipFunc
+
+	// MetadataFunc is an optional callback to attach custom metadata JSON to each entry.
+	MetadataFunc MetadataFunc
 
 	// RetentionDays automatically prunes audit log entries older than N days via
 	// PocketBase's cron scheduler. 0 = keep forever. Default: 0.
@@ -63,10 +75,11 @@ func DefaultConfig() Config {
 	ignored := make([]string, len(DefaultIgnoredFields))
 	copy(ignored, DefaultIgnoredFields)
 	return Config{
-		CollectionName: "auditLogs",
-		CollectionID:   "pbc_auditlogs_plugin",
-		IgnoredFields:  ignored,
-		RetentionDays:  0,
+		CollectionName:  "auditLogs",
+		CollectionID:    "pbc_auditlogs_plugin",
+		IgnoredFields:   ignored,
+		OwnerCollection: "users",
+		RetentionDays:   0,
 	}
 }
 
@@ -112,10 +125,25 @@ func WithOwnerField(field string) Option {
 	}
 }
 
+// WithOwnerCollection sets the owner collection name whose deleted records purge matching auditLogs.
+// Default: "users". Pass "" to disable automatic purge on owner deletion.
+func WithOwnerCollection(name string) Option {
+	return func(c *Config) {
+		c.OwnerCollection = name
+	}
+}
+
 // WithSkipFunc sets a predicate to skip audit logging for matching record events.
 func WithSkipFunc(fn SkipFunc) Option {
 	return func(c *Config) {
 		c.SkipFunc = fn
+	}
+}
+
+// WithMetadataFunc sets a callback to attach custom metadata JSON to each audit log entry.
+func WithMetadataFunc(fn MetadataFunc) Option {
+	return func(c *Config) {
+		c.MetadataFunc = fn
 	}
 }
 

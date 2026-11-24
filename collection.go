@@ -42,6 +42,11 @@ func desiredCollection(cfg Config) *core.Collection {
 		MaxSize: 1 << 20, // 1MB
 	})
 
+	c.Fields.Add(&core.JSONField{
+		Name:    "metadata",
+		MaxSize: 64 << 10, // 64KB
+	})
+
 	c.Fields.Add(&core.AutodateField{
 		Name:     "created",
 		OnCreate: true,

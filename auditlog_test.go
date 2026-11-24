@@ -59,6 +59,11 @@ func TestAuditLogCreateUpdateDelete(t *testing.T) {
 		WithSkipFunc(func(e *core.RecordEvent) bool {
 			return e.Record.GetBool("isImporting")
 		}),
+		WithMetadataFunc(func(e *core.RecordEvent) map[string]any {
+			return map[string]any{
+				"title": e.Record.GetString("title"),
+			}
+		}),
 	)
 
 	itemsCol, err := app.FindCollectionByNameOrId("items")
@@ -134,6 +139,13 @@ func TestAuditLogCreateUpdateDelete(t *testing.T) {
 	}
 	if ch := updateChanges["rating"]; ch.Old != float64(0) || ch.New != float64(10) {
 		t.Errorf("unexpected rating update change: %+v", ch)
+	}
+	var updateMeta map[string]any
+	if err := json.Unmarshal([]byte(logs[1].GetString("metadata")), &updateMeta); err != nil {
+		t.Fatalf("failed to unmarshal update metadata: %v", err)
+	}
+	if updateMeta["title"] != "Frieren" {
+		t.Errorf("expected metadata title Frieren, got %v", updateMeta["title"])
 	}
 
 	// 3. NO-OP UPDATE (reload and save without changes -> should not create a log)
@@ -267,14 +279,26 @@ func TestAuditLogHTTPRulesAndActor(t *testing.T) {
 
 	// 3. Client cannot POST directly to auditLogs (append-only)
 	(&tests.ApiScenario{
-		Name:            "client cannot create auditLogs directly",
-		Method:          http.MethodPost,
-		URL:             "/api/collections/auditLogs/records",
-		Body:            strings.NewReader(`{"collection":"items","recordId":"x","action":"CREATE"}`),
-		Headers:         map[string]string{"Authorization": token},
-		ExpectedStatus:  http.StatusForbidden,
-		ExpectedContent: []string{`"status":403`},
+		Name:                  "client cannot create auditLogs directly",
+		Method:                http.MethodPost,
+		URL:                   "/api/collections/auditLogs/records",
+		Body:                  strings.NewReader(`{"collection":"items","recordId":"x","action":"CREATE"}`),
+		Headers:               map[string]string{"Authorization": token},
+		ExpectedStatus:        http.StatusForbidden,
+		ExpectedContent:       []string{`"status":403`},
 		TestAppFactory:        func(t testing.TB) *tests.TestApp { return app },
 		DisableTestAppCleanup: true,
 	}).Test(t)
+
+	// 4. Deleting the user purges their historical auditLogs
+	if err := app.Delete(user); err != nil {
+		t.Fatalf("failed to delete user: %v", err)
+	}
+	remaining, err := app.FindAllRecords("auditLogs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 auditLogs after user deletion, got %d", len(remaining))
+	}
 }
